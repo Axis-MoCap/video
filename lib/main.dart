@@ -1,125 +1,187 @@
+import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:camera/camera.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as path;
 
-void main() {
-  runApp(const MyApp());
-}
+void main() async {
+  // Ensure that plugin services are initialized
+  WidgetsFlutterBinding.ensureInitialized();
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+  // Get available cameras
+  final cameras = await availableCameras();
+  final firstCamera = cameras.first;
 
-  // This widget is the root of your application.
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Flutter Demo',
+  runApp(
+    MaterialApp(
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        primarySwatch: Colors.blue,
         useMaterial3: true,
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
-    );
-  }
+      home: CameraScreen(camera: firstCamera),
+    ),
+  );
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
+class CameraScreen extends StatefulWidget {
+  final CameraDescription camera;
 
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+  const CameraScreen({Key? key, required this.camera}) : super(key: key);
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  CameraScreenState createState() => CameraScreenState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class CameraScreenState extends State<CameraScreen> {
+  late CameraController _controller;
+  late Future<void> _initializeControllerFuture;
+  bool _isRecording = false;
+  String _videoPath = '';
+  String _savedVideoPath = '';
+  String _videoDirectory = '';
 
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
-    });
+  @override
+  void initState() {
+    super.initState();
+    // Initialize the camera controller
+    _controller = CameraController(
+      widget.camera,
+      ResolutionPreset.high,
+      enableAudio: true,
+    );
+
+    // Initialize the controller future
+    _initializeControllerFuture = _controller.initialize();
+    
+    // Set up the video directory
+    _setupVideoDirectory();
+  }
+
+  Future<void> _setupVideoDirectory() async {
+    if (Platform.isWindows) {
+      final Directory appDocDir = await getApplicationDocumentsDirectory();
+      _videoDirectory = '${appDocDir.path}\\RaspberryPiVideos';
+    } else if (Platform.isLinux) {
+      // For Raspberry Pi (Linux)
+      _videoDirectory = '/home/pi/videos';
+    } else {
+      // For other platforms
+      final Directory appDocDir = await getApplicationDocumentsDirectory();
+      _videoDirectory = '${appDocDir.path}/RaspberryPiVideos';
+    }
+  }
+
+  @override
+  void dispose() {
+    // Dispose of the controller when the widget is disposed
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _startVideoRecording() async {
+    // Ensure the camera is initialized
+    try {
+      await _initializeControllerFuture;
+
+      // Create a video recording directory
+      Directory videoDir = Directory(_videoDirectory);
+      if (!await videoDir.exists()) {
+        await videoDir.create(recursive: true);
+      }
+
+      // Create a unique file name
+      final String videoFileName = 'video_${DateTime.now().millisecondsSinceEpoch}.mp4';
+      final String videoFilePath = path.join(_videoDirectory, videoFileName);
+
+      await _controller.startVideoRecording();
+      
+      setState(() {
+        _isRecording = true;
+        _videoPath = videoFilePath;
+      });
+    } catch (e) {
+      print('Error starting video recording: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error starting recording: $e')),
+      );
+    }
+  }
+
+  Future<void> _stopVideoRecording() async {
+    if (!_controller.value.isRecordingVideo) {
+      return;
+    }
+
+    try {
+      final XFile videoFile = await _controller.stopVideoRecording();
+      
+      // Copy the file to our predefined directory
+      final File originalVideoFile = File(videoFile.path);
+      final File savedVideoFile = await originalVideoFile.copy(_videoPath);
+      
+      setState(() {
+        _isRecording = false;
+        _savedVideoPath = savedVideoFile.path;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Video saved to: $_savedVideoPath')),
+      );
+    } catch (e) {
+      print('Error stopping video recording: $e');
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
       appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
+        title: const Text('Raspberry Pi 5 Camera'),
+        backgroundColor: Colors.red,
       ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            const Text(
-              'You have pushed the button this many times:',
-            ),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
-            ),
-          ],
-        ),
+      body: FutureBuilder<void>(
+        future: _initializeControllerFuture,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.done) {
+            return Column(
+              children: [
+                Expanded(
+                  child: Center(
+                    child: CameraPreview(_controller),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _isRecording ? Colors.red : Colors.blue,
+                    padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 50),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(15),
+                    ),
+                    minimumSize: const Size(300, 100),
+                  ),
+                  onPressed: () {
+                    if (_isRecording) {
+                      _stopVideoRecording();
+                    } else {
+                      _startVideoRecording();
+                    }
+                  },
+                  child: Text(
+                    _isRecording ? 'STOP RECORDING' : 'START RECORDING',
+                    style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white),
+                  ),
+                ),
+                const SizedBox(height: 20),
+              ],
+            );
+          } else {
+            return const Center(child: CircularProgressIndicator());
+          }
+        },
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
     );
   }
 }
