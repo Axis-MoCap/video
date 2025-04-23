@@ -5,122 +5,61 @@ import 'package:camera/camera.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 
-List<CameraDescription> cameras = [];
-
-void main() async {
-  // Ensure that plugin services are initialized
+Future<void> main() async {
+  // Ensure all widgets are initialized
   WidgetsFlutterBinding.ensureInitialized();
+  
+  runApp(const RaspberryPiCameraApp());
+}
 
-  // Get available cameras
-  try {
-    cameras = await availableCameras();
-    print('Found ${cameras.length} cameras');
-    for (var camera in cameras) {
-      print('Camera: ${camera.name}, direction: ${camera.lensDirection}');
-    }
-  } on CameraException catch (e) {
-    print('Error getting cameras: ${e.code}: ${e.description}');
-  }
+class RaspberryPiCameraApp extends StatelessWidget {
+  const RaspberryPiCameraApp({Key? key}) : super(key: key);
 
-  runApp(
-    MaterialApp(
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         primarySwatch: Colors.blue,
         useMaterial3: true,
       ),
-      home: cameras.isEmpty 
-          ? const NoCameraScreen() 
-          : CameraScreen(camera: cameras.first),
-    ),
-  );
-}
-
-class NoCameraScreen extends StatelessWidget {
-  const NoCameraScreen({Key? key}) : super(key: key);
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Camera Error'),
-        backgroundColor: Colors.red,
-      ),
-      body: const Center(
-        child: Padding(
-          padding: EdgeInsets.all(24.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.error, size: 80, color: Colors.red),
-              SizedBox(height: 16),
-              Text(
-                'No camera found or camera access denied',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                textAlign: TextAlign.center,
-              ),
-              SizedBox(height: 16),
-              Text(
-                'Please check your camera connection and app permissions in your device settings.',
-                textAlign: TextAlign.center,
-              ),
-            ],
-          ),
-        ),
-      ),
+      home: const CameraScreen(),
     );
   }
 }
 
 class CameraScreen extends StatefulWidget {
-  final CameraDescription camera;
-
-  const CameraScreen({Key? key, required this.camera}) : super(key: key);
+  const CameraScreen({Key? key}) : super(key: key);
 
   @override
   CameraScreenState createState() => CameraScreenState();
 }
 
 class CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver {
-  CameraController? _controller;
-  Future<void>? _initializeControllerFuture;
+  List<CameraDescription>? cameras;
+  CameraController? controller;
+  int selectedCameraIndex = 0;
   bool _isRecording = false;
   String _videoPath = '';
   String _savedVideoPath = '';
   String _videoDirectory = '';
-  bool _isCameraInitialized = false;
   String _errorMessage = '';
-
+  bool _camerasLoaded = false;
+  
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     
-    // Set up the video directory
-    _setupVideoDirectory().then((_) {
-      // Initialize camera after setting up directory
-      _initializeCamera();
-    });
+    // Initialize everything
+    _initializeAll();
   }
   
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    final CameraController? cameraController = _controller;
-
-    // App state changed before controller was initialized
-    if (cameraController == null || !cameraController.value.isInitialized) {
-      return;
-    }
-
-    if (state == AppLifecycleState.inactive) {
-      // Free up memory when camera not active
-      cameraController.dispose();
-    } else if (state == AppLifecycleState.resumed) {
-      // Reinitialize the camera with same properties
-      _initializeCamera();
-    }
+  Future<void> _initializeAll() async {
+    await _setupVideoDirectory();
+    await _loadCameras();
   }
-
+  
   Future<void> _setupVideoDirectory() async {
     try {
       if (Platform.isWindows) {
@@ -140,149 +79,218 @@ class CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver 
       if (!await videoDir.exists()) {
         await videoDir.create(recursive: true);
       }
-      print('Video directory set to: $_videoDirectory');
+      debugPrint('Video directory set to: $_videoDirectory');
     } catch (e) {
-      print('Error setting up video directory: $e');
-      _errorMessage = 'Error setting up storage: $e';
+      debugPrint('Error setting up video directory: $e');
+      setState(() {
+        _errorMessage = 'Error setting up storage: $e';
+      });
     }
   }
   
-  Future<void> _initializeCamera() async {
-    final CameraController cameraController = CameraController(
-      widget.camera,
-      ResolutionPreset.high,
-      enableAudio: true,
-      imageFormatGroup: ImageFormatGroup.jpeg,
-    );
-    
-    _controller = cameraController;
-
-    // Initialize the controller future
-    _initializeControllerFuture = cameraController.initialize().then((_) {
-      if (!mounted) return;
-      setState(() {
-        _isCameraInitialized = true;
-        _errorMessage = '';
-      });
-      print('Camera initialized successfully');
-    }).catchError((Object e) {
-      if (e is CameraException) {
-        switch (e.code) {
-          case 'CameraAccessDenied':
-            _errorMessage = 'Camera access was denied';
-            break;
-          case 'CameraAccessDeniedWithoutPrompt':
-            _errorMessage = 'Camera access was denied without prompt';
-            break;
-          case 'CameraAccessRestricted':
-            _errorMessage = 'Camera access is restricted';
-            break;
-          case 'AudioAccessDenied':
-            _errorMessage = 'Audio recording permission was denied';
-            break;
-          default:
-            _errorMessage = 'Error: ${e.code}\n${e.description}';
-            break;
+  Future<void> _loadCameras() async {
+    try {
+      cameras = await availableCameras();
+      
+      if (cameras != null && cameras!.isNotEmpty) {
+        debugPrint('Found ${cameras!.length} cameras');
+        for (var i = 0; i < cameras!.length; i++) {
+          debugPrint('Camera $i: ${cameras![i].name}, ${cameras![i].lensDirection}');
         }
+        
+        // Start with the first camera
+        await _initCamera(0);
       } else {
-        _errorMessage = 'Error: $e';
+        setState(() {
+          _errorMessage = 'No cameras found';
+        });
+      }
+    } on CameraException catch (e) {
+      debugPrint('Camera error: ${e.code}: ${e.description}');
+      setState(() {
+        _errorMessage = 'Camera error: ${e.description}';
+      });
+    } catch (e) {
+      debugPrint('Error loading cameras: $e');
+      setState(() {
+        _errorMessage = 'Error loading cameras: $e';
+      });
+    } finally {
+      setState(() {
+        _camerasLoaded = true;
+      });
+    }
+  }
+  
+  Future<void> _initCamera(int index) async {
+    if (cameras == null || cameras!.isEmpty) {
+      setState(() {
+        _errorMessage = 'No cameras available';
+      });
+      return;
+    }
+    
+    // If the controller is already initialized, dispose it first
+    if (controller != null) {
+      await controller!.dispose();
+    }
+    
+    if (index >= cameras!.length) {
+      index = 0;
+    }
+    
+    setState(() {
+      _errorMessage = '';
+    });
+    
+    try {
+      // Use low preset to ensure compatibility
+      controller = CameraController(
+        cameras![index],
+        ResolutionPreset.low,
+        enableAudio: true,
+        imageFormatGroup: ImageFormatGroup.jpeg,
+      );
+      
+      await controller!.initialize();
+      selectedCameraIndex = index;
+      
+      if (mounted) {
+        setState(() {});
       }
       
-      print('Camera initialization error: $_errorMessage');
-      setState(() {});
-      return;
-    });
+      debugPrint('Camera $index initialized successfully');
+    } on CameraException catch (e) {
+      debugPrint('Failed to initialize camera $index: ${e.code}, ${e.description}');
+      setState(() {
+        _errorMessage = 'Failed to initialize camera: ${e.description}';
+      });
+    } catch (e) {
+      debugPrint('Error initializing camera $index: $e');
+      setState(() {
+        _errorMessage = 'Error initializing camera: $e';
+      });
+    }
   }
-
+  
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (controller == null || !controller!.value.isInitialized) {
+      return;
+    }
+    
+    if (state == AppLifecycleState.inactive) {
+      controller!.dispose();
+    } else if (state == AppLifecycleState.resumed) {
+      _initCamera(selectedCameraIndex);
+    }
+  }
+  
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _controller?.dispose();
+    controller?.dispose();
     super.dispose();
   }
-
+  
+  void _toggleCamera() async {
+    if (cameras == null || cameras!.isEmpty) return;
+    
+    final newIndex = (selectedCameraIndex + 1) % cameras!.length;
+    await _initCamera(newIndex);
+  }
+  
   Future<void> _startVideoRecording() async {
-    if (_controller == null || !_controller!.value.isInitialized) {
-      showInSnackBar('Error: Camera is not initialized');
+    if (controller == null || !controller!.value.isInitialized) {
+      _showMessage('Error: Camera is not initialized');
       return;
     }
     
-    if (_controller!.value.isRecordingVideo) {
-      showInSnackBar('A recording is already in progress');
+    if (controller!.value.isRecordingVideo) {
+      _showMessage('A recording is already in progress');
       return;
     }
-
+    
     try {
-      await _initializeControllerFuture;
-
       // Create a unique file name
       final String videoFileName = 'video_${DateTime.now().millisecondsSinceEpoch}.mp4';
       final String videoFilePath = path.join(_videoDirectory, videoFileName);
-
-      await _controller!.startVideoRecording();
+      
+      await controller!.startVideoRecording();
       
       setState(() {
         _isRecording = true;
         _videoPath = videoFilePath;
       });
       
-      showInSnackBar('Recording started');
+      _showMessage('Recording started');
     } on CameraException catch (e) {
-      showInSnackBar('Error starting recording: ${e.description}');
-      return;
+      _showMessage('Error starting recording: ${e.description}');
     } catch (e) {
-      showInSnackBar('Error starting recording: $e');
+      _showMessage('Error starting recording: $e');
     }
   }
-
+  
   Future<void> _stopVideoRecording() async {
-    if (_controller == null || !_controller!.value.isInitialized) {
-      showInSnackBar('Error: Camera is not initialized');
+    if (controller == null || !controller!.value.isInitialized) {
+      _showMessage('Error: Camera is not initialized');
       return;
     }
-
-    if (!_controller!.value.isRecordingVideo) {
-      showInSnackBar('No recording in progress');
+    
+    if (!controller!.value.isRecordingVideo) {
+      _showMessage('No recording in progress');
       return;
     }
-
+    
     try {
-      final XFile videoFile = await _controller!.stopVideoRecording();
-      showInSnackBar('Recording stopped');
+      final XFile videoFile = await controller!.stopVideoRecording();
+      debugPrint('Original video path: ${videoFile.path}');
       
       // Copy the file to our predefined directory
       final File originalVideoFile = File(videoFile.path);
-      print('Original video path: ${videoFile.path}');
-      
       final File savedVideoFile = await originalVideoFile.copy(_videoPath);
-      print('Saved video to: ${savedVideoFile.path}');
       
       setState(() {
         _isRecording = false;
         _savedVideoPath = savedVideoFile.path;
       });
-
-      showInSnackBar('Video saved to: $_savedVideoPath');
+      
+      _showMessage('Video saved to: $_savedVideoPath');
     } on CameraException catch (e) {
-      showInSnackBar('Error stopping recording: ${e.description}');
+      _showMessage('Error stopping recording: ${e.description}');
       setState(() {
         _isRecording = false;
       });
-      return;
     } catch (e) {
-      showInSnackBar('Error stopping recording: $e');
+      _showMessage('Error stopping recording: $e');
       setState(() {
         _isRecording = false;
       });
     }
   }
   
-  void showInSnackBar(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
+  void _showMessage(String message) {
+    debugPrint(message);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message)),
+      );
+    }
+  }
+  
+  Widget _buildCameraView() {
+    if (controller == null || !controller!.value.isInitialized) {
+      return const Center(
+        child: CircularProgressIndicator(),
+      );
+    }
+    
+    return AspectRatio(
+      aspectRatio: controller!.value.aspectRatio,
+      child: CameraPreview(controller!),
     );
   }
-
+  
   @override
   Widget build(BuildContext context) {
     if (_errorMessage.isNotEmpty) {
@@ -299,9 +307,9 @@ class CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver 
               children: [
                 const Icon(Icons.error, size: 80, color: Colors.red),
                 const SizedBox(height: 16),
-                Text(
+                const Text(
                   'Camera Error',
-                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 16),
@@ -311,7 +319,7 @@ class CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver 
                 ),
                 const SizedBox(height: 24),
                 ElevatedButton(
-                  onPressed: _initializeCamera,
+                  onPressed: _initializeAll,
                   child: const Text('Try Again'),
                 ),
               ],
@@ -321,73 +329,85 @@ class CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver 
       );
     }
     
+    if (!_camerasLoaded) {
+      return const Scaffold(
+        body: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 16),
+              Text('Loading cameras...'),
+            ],
+          ),
+        ),
+      );
+    }
+    
     return Scaffold(
       appBar: AppBar(
         title: const Text('Raspberry Pi 5 Camera'),
         backgroundColor: Colors.red,
+        actions: [
+          if (cameras != null && cameras!.length > 1)
+            IconButton(
+              icon: const Icon(Icons.flip_camera_ios),
+              onPressed: _toggleCamera,
+              tooltip: 'Switch Camera',
+            ),
+        ],
       ),
-      body: _controller == null || !_isCameraInitialized
-          ? const Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  CircularProgressIndicator(),
-                  SizedBox(height: 16),
-                  Text('Initializing camera...'),
-                ],
+      body: Column(
+        children: [
+          Expanded(
+            child: Container(
+              width: double.infinity,
+              decoration: BoxDecoration(
+                color: Colors.black,
+                border: Border.all(
+                  color: _isRecording ? Colors.red : Colors.blue,
+                  width: 3,
+                ),
               ),
-            )
-          : Column(
+              child: _buildCameraView(),
+            ),
+          ),
+          const SizedBox(height: 20),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: _isRecording ? Colors.red : Colors.blue,
+              padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 50),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(15),
+              ),
+              minimumSize: const Size(300, 100),
+            ),
+            onPressed: () {
+              if (_isRecording) {
+                _stopVideoRecording();
+              } else {
+                _startVideoRecording();
+              }
+            },
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                Expanded(
-                  child: Container(
-                    width: double.infinity,
-                    decoration: BoxDecoration(
-                      color: Colors.black,
-                      border: Border.all(
-                        color: _isRecording ? Colors.red : Colors.blue,
-                        width: 3,
-                      ),
-                    ),
-                    child: CameraPreview(_controller!),
-                  ),
+                Icon(
+                  _isRecording ? Icons.stop : Icons.videocam,
+                  size: 36,
+                  color: Colors.white,
                 ),
-                const SizedBox(height: 20),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: _isRecording ? Colors.red : Colors.blue,
-                    padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 50),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(15),
-                    ),
-                    minimumSize: const Size(300, 100),
-                  ),
-                  onPressed: () {
-                    if (_isRecording) {
-                      _stopVideoRecording();
-                    } else {
-                      _startVideoRecording();
-                    }
-                  },
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        _isRecording ? Icons.stop : Icons.videocam,
-                        size: 36,
-                        color: Colors.white,
-                      ),
-                      const SizedBox(width: 12),
-                      Text(
-                        _isRecording ? 'STOP RECORDING' : 'START RECORDING',
-                        style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white),
-                      ),
-                    ],
-                  ),
+                const SizedBox(width: 12),
+                Text(
+                  _isRecording ? 'STOP RECORDING' : 'START RECORDING',
+                  style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white),
                 ),
-                const SizedBox(height: 20),
               ],
             ),
+          ),
+          const SizedBox(height: 20),
+        ],
+      ),
     );
   }
 }
