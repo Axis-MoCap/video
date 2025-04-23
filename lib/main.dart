@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 
 void main() {
   runApp(const MyApp());
@@ -13,6 +14,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Raspberry Pi 5 Camera',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
         primarySwatch: Colors.red,
         useMaterial3: true,
@@ -36,18 +38,34 @@ class _CameraScreenState extends State<CameraScreen> {
   final List<String> _logMessages = [];
   final ScrollController _scrollController = ScrollController();
   Process? _cameraProcess;
-
+  Process? _streamProcess;
+  WebViewController? _webViewController;
+  bool _isStreamRunning = false;
+  
+  // Assuming your Raspberry Pi's IP address
+  // Use local IP if running on Raspberry Pi itself
+  final String _streamUrl = 'http://127.0.0.1:8080/';
+  
   @override
   void initState() {
     super.initState();
     _createOutputDirectory();
+    _initWebView();
+    _startCameraStream();
   }
 
   @override
   void dispose() {
     _stopRecording();
+    _stopCameraStream();
     _scrollController.dispose();
     super.dispose();
+  }
+  
+  void _initWebView() {
+    _webViewController = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..loadRequest(Uri.parse(_streamUrl));
   }
 
   Future<void> _createOutputDirectory() async {
@@ -60,6 +78,82 @@ class _CameraScreenState extends State<CameraScreen> {
       _addLog('Output directory: $_outputDir');
     } catch (e) {
       _addLog('Error creating directory: $e');
+    }
+  }
+  
+  Future<void> _startCameraStream() async {
+    if (_isStreamRunning) return;
+    
+    try {
+      _addLog('Starting camera stream...');
+      
+      // Start a streaming server using libcamera-vid
+      // Port 8080 for HTTP stream
+      _streamProcess = await Process.start(
+        'libcamera-vid',
+        [
+          '--width', '640',
+          '--height', '480',
+          '--framerate', '30',
+          '--inline', // Use inline headers for lower latency
+          '--listen', // Enable HTTP server
+          '--output', 'tcp://0.0.0.0:8080' // Stream over TCP
+        ],
+        runInShell: true,
+      );
+      
+      _addLog('Camera stream started on port 8080');
+      
+      _streamProcess?.stdout.listen((data) {
+        _addLog('Stream output: ${String.fromCharCodes(data).trim()}');
+      });
+      
+      _streamProcess?.stderr.listen((data) {
+        _addLog('Stream error: ${String.fromCharCodes(data).trim()}');
+      });
+      
+      setState(() {
+        _isStreamRunning = true;
+      });
+      
+      // Alternative method using raspivid if libcamera-vid streaming doesn't work
+      // Comment out the above code and uncomment this if needed
+      /*
+      _streamProcess = await Process.start(
+        'raspivid',
+        [
+          '-t', '0',
+          '-w', '640',
+          '-h', '480',
+          '-fps', '30',
+          '-o', '-', // Output to stdout
+          '|',
+          'cvlc', 
+          '-', // Read from stdin
+          '--sout', '#standard{access=http,mux=ts,dst=0.0.0.0:8080}',
+          '--no-audio'
+        ],
+        runInShell: true,
+      );
+      */
+      
+    } catch (e) {
+      _addLog('Error starting camera stream: $e');
+      setState(() {
+        _isStreamRunning = false;
+      });
+    }
+  }
+  
+  Future<void> _stopCameraStream() async {
+    if (_streamProcess != null) {
+      _addLog('Stopping camera stream...');
+      _streamProcess!.kill(ProcessSignal.sigterm);
+      await _streamProcess!.exitCode;
+      setState(() {
+        _isStreamRunning = false;
+      });
+      _addLog('Camera stream stopped');
     }
   }
 
@@ -99,22 +193,21 @@ class _CameraScreenState extends State<CameraScreen> {
       
       _addLog('Recording to: $_currentVideoPath');
       
-      // Run libcamera-vid command
+      // Run libcamera-vid command to record video without displaying preview
+      // (since we're already showing the stream in the WebView)
       _cameraProcess = await Process.start(
         'libcamera-vid', 
         [
           '--output', _currentVideoPath,
           '--width', '1920',
           '--height', '1080',
-          '--timeout', '0',    // No timeout, manual stop
-          '--nopreview'        // No preview
+          '--nopreview'
         ],
         runInShell: true,
       );
       
       _addLog('Recording started with PID: ${_cameraProcess?.pid}');
       
-      // Listen to process stdout and stderr
       _cameraProcess?.stdout.listen((data) {
         _addLog('Camera output: ${String.fromCharCodes(data).trim()}');
       });
@@ -184,6 +277,38 @@ class _CameraScreenState extends State<CameraScreen> {
       _addLog('Error converting video: $e');
     }
   }
+  
+  Widget _buildCameraPreview() {
+    if (Platform.isLinux) {
+      // Use WebView to display the camera stream
+      if (_webViewController != null) {
+        return WebViewWidget(controller: _webViewController!);
+      } else {
+        return const Center(
+          child: Text('Initializing camera preview...'),
+        );
+      }
+    } else {
+      // On non-Linux platforms, show a placeholder
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.videocam,
+              size: 80,
+              color: Colors.grey[400],
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Camera preview only available on Raspberry Pi',
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -191,58 +316,80 @@ class _CameraScreenState extends State<CameraScreen> {
       appBar: AppBar(
         title: const Text('Raspberry Pi 5 Camera'),
         backgroundColor: Colors.red,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: () {
+              _stopCameraStream();
+              _startCameraStream();
+              _webViewController?.reload();
+            },
+            tooltip: 'Restart Camera Stream',
+          ),
+        ],
       ),
       body: Column(
         children: [
           Expanded(
-            flex: 2,
-            child: Center(
-              child: _isRecording
-                  ? Container(
-                      width: 200,
-                      height: 200,
-                      decoration: BoxDecoration(
-                        color: Colors.red.withOpacity(0.3),
-                        shape: BoxShape.circle,
-                      ),
-                      child: Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(
-                              Icons.videocam,
-                              color: Colors.white,
-                              size: 80,
-                            ),
-                            const SizedBox(height: 16),
-                            Text(
-                              'RECORDING',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 20,
-                                fontWeight: FontWeight.bold,
-                                shadows: [
-                                  Shadow(
-                                    blurRadius: 10.0,
-                                    color: Colors.red.shade800,
-                                    offset: const Offset(0, 0),
-                                  ),
-                                ],
+            flex: 3,
+            child: Container(
+              margin: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                border: Border.all(
+                  color: _isRecording ? Colors.red : Colors.blue,
+                  width: 3,
+                ),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(5),
+                child: Stack(
+                  children: [
+                    _buildCameraPreview(),
+                    if (_isRecording)
+                      Positioned(
+                        top: 16,
+                        right: 16,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.red,
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Container(
+                                width: 12,
+                                height: 12,
+                                decoration: const BoxDecoration(
+                                  color: Colors.white,
+                                  shape: BoxShape.circle,
+                                ),
                               ),
-                            ),
-                          ],
+                              const SizedBox(width: 8),
+                              const Text(
+                                'REC',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
-                    )
-                  : const Text(
-                      'Press the button below to start recording',
-                      style: TextStyle(fontSize: 18),
-                    ),
+                  ],
+                ),
+              ),
             ),
           ),
           Container(
             width: double.infinity,
-            padding: const EdgeInsets.all(20),
+            padding: const EdgeInsets.all(16),
             child: ElevatedButton(
               onPressed: _toggleRecording,
               style: ElevatedButton.styleFrom(
@@ -274,8 +421,8 @@ class _CameraScreenState extends State<CameraScreen> {
             ),
           ),
           Container(
-            height: 200,
-            margin: const EdgeInsets.all(20),
+            height: 150,
+            margin: const EdgeInsets.all(16),
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
               color: Colors.black.withOpacity(0.1),
@@ -285,9 +432,25 @@ class _CameraScreenState extends State<CameraScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'LOG:',
-                  style: TextStyle(fontWeight: FontWeight.bold),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      'LOG:',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.clear_all, size: 16),
+                      onPressed: () {
+                        setState(() {
+                          _logMessages.clear();
+                        });
+                      },
+                      tooltip: 'Clear logs',
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 4),
                 Expanded(
