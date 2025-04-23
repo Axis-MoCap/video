@@ -55,6 +55,11 @@ class _RaspberryPiCameraState extends State<RaspberryPiCamera> {
 
   Future<void> _setupVideoDirectory() async {
     try {
+      // For Windows testing, use a local directory
+      if (Platform.isWindows) {
+        _videoDirectory = Directory.current.path + '\\videos';
+      }
+      
       // Create the video directory if it doesn't exist
       final directory = Directory(_videoDirectory);
       if (!await directory.exists()) {
@@ -84,36 +89,49 @@ class _RaspberryPiCameraState extends State<RaspberryPiCamera> {
       
       _log('Starting recording to: $_currentVideoPath');
       
-      // Start the libcamera-vid command
-      // Using standard parameters, adjust as needed for your specific camera
-      final shell = Shell();
-      
-      _log('Running libcamera-vid command...');
-      
-      // Launch the process
-      _recordingProcess = await shell.startDetached(
-        'libcamera-vid',
-        [
-          '--output', _currentVideoPath,
-          '--width', '1920',
-          '--height', '1080',
-          '--timeout', '0', // No timeout, we'll stop it manually
-          '--nopreview' // No preview since we're using Flutter UI
-        ],
-      );
+      if (Platform.isLinux) {
+        // On Raspberry Pi (Linux), use libcamera-vid
+        _log('Running libcamera-vid command on Linux...');
+        
+        // Use Process.start for non-blocking operation
+        _recordingProcess = await Process.start(
+          'libcamera-vid',
+          [
+            '--output', _currentVideoPath,
+            '--width', '1920',
+            '--height', '1080',
+            '--timeout', '0', // No timeout, we'll stop it manually
+            '--nopreview' // No preview since we're using Flutter UI
+          ],
+        );
+        
+        // Log process output
+        _recordingProcess!.stdout.transform(const SystemEncoding().decoder).listen((data) {
+          _log('Process output: $data');
+        });
+        
+        _recordingProcess!.stderr.transform(const SystemEncoding().decoder).listen((data) {
+          _log('Process error: $data');
+        });
+      } else {
+        // On other platforms (Windows/Mac), just create a placeholder file for testing
+        _log('Creating placeholder file on non-Linux platform for testing');
+        final testFile = File(_currentVideoPath);
+        await testFile.writeAsString('This is a test video file created on ${DateTime.now()}');
+      }
       
       setState(() {
         _isRecording = true;
       });
       
-      _log('Recording started with PID: ${_recordingProcess?.pid}');
+      _log('Recording started' + (_recordingProcess != null ? ' with PID: ${_recordingProcess!.pid}' : ''));
     } catch (e) {
       _log('Error starting recording: $e');
     }
   }
 
   Future<void> _stopRecording() async {
-    if (!_isRecording || _recordingProcess == null) {
+    if (!_isRecording) {
       _log('Not recording');
       return;
     }
@@ -124,17 +142,24 @@ class _RaspberryPiCameraState extends State<RaspberryPiCamera> {
       // Kill the recording process
       final process = _recordingProcess;
       if (process != null) {
-        if (Platform.isLinux || Platform.isMacOS) {
-          // On Linux (Raspberry Pi) we terminate the process
-          Process.killPid(process.pid);
-        } else {
-          // This would be used on other platforms, but Raspberry Pi is Linux
-          process.kill();
+        _log('Terminating process with PID: ${process.pid}');
+        try {
+          if (Platform.isLinux || Platform.isMacOS) {
+            // On Linux (Raspberry Pi) we terminate the process
+            Process.killPid(process.pid);
+          } else {
+            // This would be used on other platforms, but Raspberry Pi is Linux
+            process.kill();
+          }
+        } catch (e) {
+          _log('Error killing process: $e');
         }
       }
       
-      // Convert the H264 to MP4 if needed
-      await _convertVideoToMP4();
+      if (Platform.isLinux) {
+        // Convert the H264 to MP4 if needed
+        await _convertVideoToMP4();
+      }
       
       setState(() {
         _isRecording = false;
@@ -161,7 +186,12 @@ class _RaspberryPiCameraState extends State<RaspberryPiCamera> {
       _log('Converting H264 to MP4: $mp4Path');
       
       final shell = Shell();
-      await shell.run('MP4Box -add $_currentVideoPath $mp4Path');
+      final result = await shell.run('MP4Box -add $_currentVideoPath $mp4Path');
+      
+      _log('Conversion output: ${result.outText}');
+      if (result.errText.isNotEmpty) {
+        _log('Conversion errors: ${result.errText}');
+      }
       
       _log('Conversion complete: $mp4Path');
       
