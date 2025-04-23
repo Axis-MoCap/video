@@ -1,14 +1,12 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:camera/camera.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
+import 'package:process_run/process_run.dart';
 
-Future<void> main() async {
-  // Ensure all widgets are initialized
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  
   runApp(const RaspberryPiCameraApp());
 }
 
@@ -23,389 +21,252 @@ class RaspberryPiCameraApp extends StatelessWidget {
         primarySwatch: Colors.blue,
         useMaterial3: true,
       ),
-      home: const CameraScreen(),
+      home: const RaspberryPiCamera(),
     );
   }
 }
 
-class CameraScreen extends StatefulWidget {
-  const CameraScreen({Key? key}) : super(key: key);
+class RaspberryPiCamera extends StatefulWidget {
+  const RaspberryPiCamera({Key? key}) : super(key: key);
 
   @override
-  CameraScreenState createState() => CameraScreenState();
+  State<RaspberryPiCamera> createState() => _RaspberryPiCameraState();
 }
 
-class CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver {
-  List<CameraDescription>? cameras;
-  CameraController? controller;
-  int selectedCameraIndex = 0;
+class _RaspberryPiCameraState extends State<RaspberryPiCamera> {
   bool _isRecording = false;
-  String _videoPath = '';
-  String _savedVideoPath = '';
-  String _videoDirectory = '';
-  String _errorMessage = '';
-  bool _camerasLoaded = false;
+  String _videoDirectory = '/home/pi/videos';
+  String _currentVideoPath = '';
+  Process? _recordingProcess;
+  final StreamController<String> _logStreamController = StreamController<String>.broadcast();
   
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    
-    // Initialize everything
-    _initializeAll();
+    _setupVideoDirectory();
   }
-  
-  Future<void> _initializeAll() async {
-    await _setupVideoDirectory();
-    await _loadCameras();
-  }
-  
-  Future<void> _setupVideoDirectory() async {
-    try {
-      if (Platform.isWindows) {
-        final Directory appDocDir = await getApplicationDocumentsDirectory();
-        _videoDirectory = '${appDocDir.path}\\RaspberryPiVideos';
-      } else if (Platform.isLinux) {
-        // For Raspberry Pi (Linux)
-        _videoDirectory = '/home/pi/videos';
-      } else {
-        // For other platforms
-        final Directory appDocDir = await getApplicationDocumentsDirectory();
-        _videoDirectory = '${appDocDir.path}/RaspberryPiVideos';
-      }
-      
-      // Create directory if it doesn't exist
-      Directory videoDir = Directory(_videoDirectory);
-      if (!await videoDir.exists()) {
-        await videoDir.create(recursive: true);
-      }
-      debugPrint('Video directory set to: $_videoDirectory');
-    } catch (e) {
-      debugPrint('Error setting up video directory: $e');
-      setState(() {
-        _errorMessage = 'Error setting up storage: $e';
-      });
-    }
-  }
-  
-  Future<void> _loadCameras() async {
-    try {
-      cameras = await availableCameras();
-      
-      if (cameras != null && cameras!.isNotEmpty) {
-        debugPrint('Found ${cameras!.length} cameras');
-        for (var i = 0; i < cameras!.length; i++) {
-          debugPrint('Camera $i: ${cameras![i].name}, ${cameras![i].lensDirection}');
-        }
-        
-        // Start with the first camera
-        await _initCamera(0);
-      } else {
-        setState(() {
-          _errorMessage = 'No cameras found';
-        });
-      }
-    } on CameraException catch (e) {
-      debugPrint('Camera error: ${e.code}: ${e.description}');
-      setState(() {
-        _errorMessage = 'Camera error: ${e.description}';
-      });
-    } catch (e) {
-      debugPrint('Error loading cameras: $e');
-      setState(() {
-        _errorMessage = 'Error loading cameras: $e';
-      });
-    } finally {
-      setState(() {
-        _camerasLoaded = true;
-      });
-    }
-  }
-  
-  Future<void> _initCamera(int index) async {
-    if (cameras == null || cameras!.isEmpty) {
-      setState(() {
-        _errorMessage = 'No cameras available';
-      });
-      return;
-    }
-    
-    // If the controller is already initialized, dispose it first
-    if (controller != null) {
-      await controller!.dispose();
-    }
-    
-    if (index >= cameras!.length) {
-      index = 0;
-    }
-    
-    setState(() {
-      _errorMessage = '';
-    });
-    
-    try {
-      // Use low preset to ensure compatibility
-      controller = CameraController(
-        cameras![index],
-        ResolutionPreset.low,
-        enableAudio: true,
-        imageFormatGroup: ImageFormatGroup.jpeg,
-      );
-      
-      await controller!.initialize();
-      selectedCameraIndex = index;
-      
-      if (mounted) {
-        setState(() {});
-      }
-      
-      debugPrint('Camera $index initialized successfully');
-    } on CameraException catch (e) {
-      debugPrint('Failed to initialize camera $index: ${e.code}, ${e.description}');
-      setState(() {
-        _errorMessage = 'Failed to initialize camera: ${e.description}';
-      });
-    } catch (e) {
-      debugPrint('Error initializing camera $index: $e');
-      setState(() {
-        _errorMessage = 'Error initializing camera: $e';
-      });
-    }
-  }
-  
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (controller == null || !controller!.value.isInitialized) {
-      return;
-    }
-    
-    if (state == AppLifecycleState.inactive) {
-      controller!.dispose();
-    } else if (state == AppLifecycleState.resumed) {
-      _initCamera(selectedCameraIndex);
-    }
-  }
-  
+
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    controller?.dispose();
+    _stopRecording();
+    _logStreamController.close();
     super.dispose();
   }
-  
-  void _toggleCamera() async {
-    if (cameras == null || cameras!.isEmpty) return;
-    
-    final newIndex = (selectedCameraIndex + 1) % cameras!.length;
-    await _initCamera(newIndex);
-  }
-  
-  Future<void> _startVideoRecording() async {
-    if (controller == null || !controller!.value.isInitialized) {
-      _showMessage('Error: Camera is not initialized');
-      return;
-    }
-    
-    if (controller!.value.isRecordingVideo) {
-      _showMessage('A recording is already in progress');
-      return;
-    }
-    
+
+  Future<void> _setupVideoDirectory() async {
     try {
-      // Create a unique file name
-      final String videoFileName = 'video_${DateTime.now().millisecondsSinceEpoch}.mp4';
-      final String videoFilePath = path.join(_videoDirectory, videoFileName);
+      // Create the video directory if it doesn't exist
+      final directory = Directory(_videoDirectory);
+      if (!await directory.exists()) {
+        await directory.create(recursive: true);
+      }
+      _log('Video directory set to: $_videoDirectory');
+    } catch (e) {
+      _log('Error setting up video directory: $e');
+    }
+  }
+
+  void _log(String message) {
+    debugPrint(message);
+    _logStreamController.add(message);
+  }
+
+  Future<void> _startRecording() async {
+    if (_isRecording) {
+      _log('Already recording');
+      return;
+    }
+
+    try {
+      // Create a timestamp-based filename
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      _currentVideoPath = path.join(_videoDirectory, 'video_$timestamp.h264');
       
-      await controller!.startVideoRecording();
+      _log('Starting recording to: $_currentVideoPath');
+      
+      // Start the libcamera-vid command
+      // Using standard parameters, adjust as needed for your specific camera
+      final shell = Shell();
+      
+      _log('Running libcamera-vid command...');
+      
+      // Launch the process
+      _recordingProcess = await shell.startDetached(
+        'libcamera-vid',
+        [
+          '--output', _currentVideoPath,
+          '--width', '1920',
+          '--height', '1080',
+          '--timeout', '0', // No timeout, we'll stop it manually
+          '--nopreview' // No preview since we're using Flutter UI
+        ],
+      );
       
       setState(() {
         _isRecording = true;
-        _videoPath = videoFilePath;
       });
       
-      _showMessage('Recording started');
-    } on CameraException catch (e) {
-      _showMessage('Error starting recording: ${e.description}');
+      _log('Recording started with PID: ${_recordingProcess?.pid}');
     } catch (e) {
-      _showMessage('Error starting recording: $e');
+      _log('Error starting recording: $e');
     }
   }
-  
-  Future<void> _stopVideoRecording() async {
-    if (controller == null || !controller!.value.isInitialized) {
-      _showMessage('Error: Camera is not initialized');
+
+  Future<void> _stopRecording() async {
+    if (!_isRecording || _recordingProcess == null) {
+      _log('Not recording');
       return;
     }
-    
-    if (!controller!.value.isRecordingVideo) {
-      _showMessage('No recording in progress');
-      return;
-    }
-    
+
     try {
-      final XFile videoFile = await controller!.stopVideoRecording();
-      debugPrint('Original video path: ${videoFile.path}');
+      _log('Stopping recording...');
       
-      // Copy the file to our predefined directory
-      final File originalVideoFile = File(videoFile.path);
-      final File savedVideoFile = await originalVideoFile.copy(_videoPath);
+      // Kill the recording process
+      final process = _recordingProcess;
+      if (process != null) {
+        if (Platform.isLinux || Platform.isMacOS) {
+          // On Linux (Raspberry Pi) we terminate the process
+          Process.killPid(process.pid);
+        } else {
+          // This would be used on other platforms, but Raspberry Pi is Linux
+          process.kill();
+        }
+      }
+      
+      // Convert the H264 to MP4 if needed
+      await _convertVideoToMP4();
       
       setState(() {
         _isRecording = false;
-        _savedVideoPath = savedVideoFile.path;
+        _recordingProcess = null;
       });
       
-      _showMessage('Video saved to: $_savedVideoPath');
-    } on CameraException catch (e) {
-      _showMessage('Error stopping recording: ${e.description}');
-      setState(() {
-        _isRecording = false;
-      });
+      _log('Recording stopped. Video saved to: $_currentVideoPath');
     } catch (e) {
-      _showMessage('Error stopping recording: $e');
+      _log('Error stopping recording: $e');
       setState(() {
         _isRecording = false;
+        _recordingProcess = null;
       });
     }
   }
-  
-  void _showMessage(String message) {
-    debugPrint(message);
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(message)),
-      );
+
+  Future<void> _convertVideoToMP4() async {
+    try {
+      if (!_currentVideoPath.endsWith('.h264')) {
+        return; // No conversion needed
+      }
+      
+      final mp4Path = _currentVideoPath.replaceAll('.h264', '.mp4');
+      _log('Converting H264 to MP4: $mp4Path');
+      
+      final shell = Shell();
+      await shell.run('MP4Box -add $_currentVideoPath $mp4Path');
+      
+      _log('Conversion complete: $mp4Path');
+      
+      // Update the current path to the MP4 file
+      _currentVideoPath = mp4Path;
+    } catch (e) {
+      _log('Error converting video: $e');
+      _log('Note: You may need to install MP4Box using: sudo apt-get install gpac');
     }
   }
-  
-  Widget _buildCameraView() {
-    if (controller == null || !controller!.value.isInitialized) {
-      return const Center(
-        child: CircularProgressIndicator(),
-      );
-    }
-    
-    return AspectRatio(
-      aspectRatio: controller!.value.aspectRatio,
-      child: CameraPreview(controller!),
-    );
-  }
-  
+
   @override
   Widget build(BuildContext context) {
-    if (_errorMessage.isNotEmpty) {
-      return Scaffold(
-        appBar: AppBar(
-          title: const Text('Camera Error'),
-          backgroundColor: Colors.red,
-        ),
-        body: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24.0),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(Icons.error, size: 80, color: Colors.red),
-                const SizedBox(height: 16),
-                const Text(
-                  'Camera Error',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  _errorMessage,
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 24),
-                ElevatedButton(
-                  onPressed: _initializeAll,
-                  child: const Text('Try Again'),
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
-    }
-    
-    if (!_camerasLoaded) {
-      return const Scaffold(
-        body: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              CircularProgressIndicator(),
-              SizedBox(height: 16),
-              Text('Loading cameras...'),
-            ],
-          ),
-        ),
-      );
-    }
-    
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Raspberry Pi 5 Camera'),
+        title: const Text('Raspberry Pi 5 AI Camera'),
         backgroundColor: Colors.red,
-        actions: [
-          if (cameras != null && cameras!.length > 1)
-            IconButton(
-              icon: const Icon(Icons.flip_camera_ios),
-              onPressed: _toggleCamera,
-              tooltip: 'Switch Camera',
-            ),
-        ],
       ),
       body: Column(
         children: [
           Expanded(
+            flex: 2,
             child: Container(
               width: double.infinity,
-              decoration: BoxDecoration(
-                color: Colors.black,
-                border: Border.all(
-                  color: _isRecording ? Colors.red : Colors.blue,
-                  width: 3,
-                ),
+              color: Colors.black,
+              child: Center(
+                child: _isRecording
+                    ? Container(
+                        width: 120,
+                        height: 120,
+                        decoration: BoxDecoration(
+                          color: Colors.red.withOpacity(0.5),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          Icons.videocam,
+                          color: Colors.white,
+                          size: 60,
+                        ),
+                      )
+                    : const Text(
+                        'Camera Preview Not Available',
+                        style: TextStyle(color: Colors.white),
+                      ),
               ),
-              child: _buildCameraView(),
             ),
           ),
-          const SizedBox(height: 20),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: _isRecording ? Colors.red : Colors.blue,
-              padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 50),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(15),
+          Expanded(
+            flex: 1,
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: [
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _isRecording ? Colors.red : Colors.blue,
+                      padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 50),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(15),
+                      ),
+                      minimumSize: const Size(300, 100),
+                    ),
+                    onPressed: _isRecording ? _stopRecording : _startRecording,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          _isRecording ? Icons.stop : Icons.videocam,
+                          size: 36,
+                          color: Colors.white,
+                        ),
+                        const SizedBox(width: 12),
+                        Text(
+                          _isRecording ? 'STOP RECORDING' : 'START RECORDING',
+                          style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Expanded(
+                    child: StreamBuilder<String>(
+                      stream: _logStreamController.stream,
+                      builder: (context, snapshot) {
+                        return Container(
+                          decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          padding: const EdgeInsets.all(8),
+                          child: SingleChildScrollView(
+                            child: Text(
+                              snapshot.data ?? 'Waiting for logs...',
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ],
               ),
-              minimumSize: const Size(300, 100),
-            ),
-            onPressed: () {
-              if (_isRecording) {
-                _stopVideoRecording();
-              } else {
-                _startVideoRecording();
-              }
-            },
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  _isRecording ? Icons.stop : Icons.videocam,
-                  size: 36,
-                  color: Colors.white,
-                ),
-                const SizedBox(width: 12),
-                Text(
-                  _isRecording ? 'STOP RECORDING' : 'START RECORDING',
-                  style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white),
-                ),
-              ],
             ),
           ),
-          const SizedBox(height: 20),
         ],
       ),
     );
