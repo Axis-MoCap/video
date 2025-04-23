@@ -1,205 +1,187 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:path/path.dart' as path;
-import 'package:process_run/process_run.dart';
 
 void main() {
-  WidgetsFlutterBinding.ensureInitialized();
-  runApp(const RaspberryPiCameraApp());
+  runApp(const MyApp());
 }
 
-class RaspberryPiCameraApp extends StatelessWidget {
-  const RaspberryPiCameraApp({Key? key}) : super(key: key);
+class MyApp extends StatelessWidget {
+  const MyApp({Key? key}) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      debugShowCheckedModeBanner: false,
+      title: 'Raspberry Pi 5 Camera',
       theme: ThemeData(
-        primarySwatch: Colors.blue,
+        primarySwatch: Colors.red,
         useMaterial3: true,
       ),
-      home: const RaspberryPiCamera(),
+      home: const CameraScreen(),
     );
   }
 }
 
-class RaspberryPiCamera extends StatefulWidget {
-  const RaspberryPiCamera({Key? key}) : super(key: key);
+class CameraScreen extends StatefulWidget {
+  const CameraScreen({Key? key}) : super(key: key);
 
   @override
-  State<RaspberryPiCamera> createState() => _RaspberryPiCameraState();
+  State<CameraScreen> createState() => _CameraScreenState();
 }
 
-class _RaspberryPiCameraState extends State<RaspberryPiCamera> {
+class _CameraScreenState extends State<CameraScreen> {
   bool _isRecording = false;
-  String _videoDirectory = '/home/pi/videos';
+  String _outputDir = '/home/pi/videos';
   String _currentVideoPath = '';
-  Process? _recordingProcess;
-  final StreamController<String> _logStreamController = StreamController<String>.broadcast();
-  
+  final List<String> _logMessages = [];
+  final ScrollController _scrollController = ScrollController();
+  Process? _cameraProcess;
+
   @override
   void initState() {
     super.initState();
-    _setupVideoDirectory();
+    _createOutputDirectory();
   }
 
   @override
   void dispose() {
     _stopRecording();
-    _logStreamController.close();
+    _scrollController.dispose();
     super.dispose();
   }
 
-  Future<void> _setupVideoDirectory() async {
+  Future<void> _createOutputDirectory() async {
     try {
-      // For Windows testing, use a local directory
-      if (Platform.isWindows) {
-        _videoDirectory = Directory.current.path + '\\videos';
+      // Create output directory if it doesn't exist
+      final dir = Directory(_outputDir);
+      if (!await dir.exists()) {
+        await dir.create(recursive: true);
       }
-      
-      // Create the video directory if it doesn't exist
-      final directory = Directory(_videoDirectory);
-      if (!await directory.exists()) {
-        await directory.create(recursive: true);
-      }
-      _log('Video directory set to: $_videoDirectory');
+      _addLog('Output directory: $_outputDir');
     } catch (e) {
-      _log('Error setting up video directory: $e');
+      _addLog('Error creating directory: $e');
     }
   }
 
-  void _log(String message) {
-    debugPrint(message);
-    _logStreamController.add(message);
+  void _addLog(String message) {
+    setState(() {
+      _logMessages.add('${DateTime.now().toString().split('.').first}: $message');
+    });
+    
+    // Scroll to bottom of log
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  Future<void> _toggleRecording() async {
+    if (_isRecording) {
+      await _stopRecording();
+    } else {
+      await _startRecording();
+    }
   }
 
   Future<void> _startRecording() async {
-    if (_isRecording) {
-      _log('Already recording');
-      return;
-    }
+    if (_isRecording) return;
 
+    _addLog('Starting recording...');
+    
     try {
-      // Create a timestamp-based filename
       final timestamp = DateTime.now().millisecondsSinceEpoch;
-      _currentVideoPath = path.join(_videoDirectory, 'video_$timestamp.h264');
+      _currentVideoPath = '$_outputDir/video_$timestamp.h264';
       
-      _log('Starting recording to: $_currentVideoPath');
+      _addLog('Recording to: $_currentVideoPath');
       
-      if (Platform.isLinux) {
-        // On Raspberry Pi (Linux), use libcamera-vid
-        _log('Running libcamera-vid command on Linux...');
-        
-        // Use Process.start for non-blocking operation
-        _recordingProcess = await Process.start(
-          'libcamera-vid',
-          [
-            '--output', _currentVideoPath,
-            '--width', '1920',
-            '--height', '1080',
-            '--timeout', '0', // No timeout, we'll stop it manually
-            '--nopreview' // No preview since we're using Flutter UI
-          ],
-        );
-        
-        // Log process output
-        _recordingProcess!.stdout.transform(const SystemEncoding().decoder).listen((data) {
-          _log('Process output: $data');
-        });
-        
-        _recordingProcess!.stderr.transform(const SystemEncoding().decoder).listen((data) {
-          _log('Process error: $data');
-        });
-      } else {
-        // On other platforms (Windows/Mac), just create a placeholder file for testing
-        _log('Creating placeholder file on non-Linux platform for testing');
-        final testFile = File(_currentVideoPath);
-        await testFile.writeAsString('This is a test video file created on ${DateTime.now()}');
-      }
+      // Run libcamera-vid command
+      _cameraProcess = await Process.start(
+        'libcamera-vid', 
+        [
+          '--output', _currentVideoPath,
+          '--width', '1920',
+          '--height', '1080',
+          '--timeout', '0',    // No timeout, manual stop
+          '--nopreview'        // No preview
+        ],
+        runInShell: true,
+      );
+      
+      _addLog('Recording started with PID: ${_cameraProcess?.pid}');
+      
+      // Listen to process stdout and stderr
+      _cameraProcess?.stdout.listen((data) {
+        _addLog('Camera output: ${String.fromCharCodes(data).trim()}');
+      });
+      
+      _cameraProcess?.stderr.listen((data) {
+        _addLog('Camera error: ${String.fromCharCodes(data).trim()}');
+      });
       
       setState(() {
         _isRecording = true;
       });
-      
-      _log('Recording started' + (_recordingProcess != null ? ' with PID: ${_recordingProcess!.pid}' : ''));
     } catch (e) {
-      _log('Error starting recording: $e');
+      _addLog('Error starting recording: $e');
     }
   }
 
   Future<void> _stopRecording() async {
-    if (!_isRecording) {
-      _log('Not recording');
-      return;
-    }
+    if (!_isRecording) return;
 
+    _addLog('Stopping recording...');
+    
     try {
-      _log('Stopping recording...');
-      
-      // Kill the recording process
-      final process = _recordingProcess;
-      if (process != null) {
-        _log('Terminating process with PID: ${process.pid}');
-        try {
-          if (Platform.isLinux || Platform.isMacOS) {
-            // On Linux (Raspberry Pi) we terminate the process
-            Process.killPid(process.pid);
-          } else {
-            // This would be used on other platforms, but Raspberry Pi is Linux
-            process.kill();
-          }
-        } catch (e) {
-          _log('Error killing process: $e');
-        }
+      // Kill the process
+      if (_cameraProcess != null) {
+        _addLog('Terminating process ${_cameraProcess!.pid}');
+        _cameraProcess!.kill(ProcessSignal.sigterm);
+        await _cameraProcess!.exitCode;
       }
       
-      if (Platform.isLinux) {
-        // Convert the H264 to MP4 if needed
-        await _convertVideoToMP4();
-      }
+      _addLog('Recording stopped. Video saved to $_currentVideoPath');
+      
+      // Convert to MP4
+      _convertToMP4();
       
       setState(() {
         _isRecording = false;
-        _recordingProcess = null;
+        _cameraProcess = null;
       });
-      
-      _log('Recording stopped. Video saved to: $_currentVideoPath');
     } catch (e) {
-      _log('Error stopping recording: $e');
+      _addLog('Error stopping recording: $e');
       setState(() {
         _isRecording = false;
-        _recordingProcess = null;
+        _cameraProcess = null;
       });
     }
   }
 
-  Future<void> _convertVideoToMP4() async {
+  Future<void> _convertToMP4() async {
     try {
-      if (!_currentVideoPath.endsWith('.h264')) {
-        return; // No conversion needed
-      }
+      if (!_currentVideoPath.endsWith('.h264')) return;
       
       final mp4Path = _currentVideoPath.replaceAll('.h264', '.mp4');
-      _log('Converting H264 to MP4: $mp4Path');
+      _addLog('Converting to MP4: $mp4Path');
       
-      final shell = Shell();
-      final result = await shell.run('MP4Box -add $_currentVideoPath $mp4Path');
+      final result = await Process.run(
+        'MP4Box',
+        ['-add', _currentVideoPath, mp4Path],
+        runInShell: true,
+      );
       
-      _log('Conversion output: ${result.outText}');
-      if (result.errText.isNotEmpty) {
-        _log('Conversion errors: ${result.errText}');
+      if (result.exitCode == 0) {
+        _addLog('Conversion successful');
+      } else {
+        _addLog('Conversion error: ${result.stderr}');
       }
-      
-      _log('Conversion complete: $mp4Path');
-      
-      // Update the current path to the MP4 file
-      _currentVideoPath = mp4Path;
     } catch (e) {
-      _log('Error converting video: $e');
-      _log('Note: You may need to install MP4Box using: sudo apt-get install gpac');
+      _addLog('Error converting video: $e');
     }
   }
 
@@ -207,94 +189,120 @@ class _RaspberryPiCameraState extends State<RaspberryPiCamera> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Raspberry Pi 5 AI Camera'),
+        title: const Text('Raspberry Pi 5 Camera'),
         backgroundColor: Colors.red,
       ),
       body: Column(
         children: [
           Expanded(
             flex: 2,
-            child: Container(
-              width: double.infinity,
-              color: Colors.black,
-              child: Center(
-                child: _isRecording
-                    ? Container(
-                        width: 120,
-                        height: 120,
-                        decoration: BoxDecoration(
-                          color: Colors.red.withOpacity(0.5),
-                          shape: BoxShape.circle,
-                        ),
-                        child: const Icon(
-                          Icons.videocam,
-                          color: Colors.white,
-                          size: 60,
-                        ),
-                      )
-                    : const Text(
-                        'Camera Preview Not Available',
-                        style: TextStyle(color: Colors.white),
+            child: Center(
+              child: _isRecording
+                  ? Container(
+                      width: 200,
+                      height: 200,
+                      decoration: BoxDecoration(
+                        color: Colors.red.withOpacity(0.3),
+                        shape: BoxShape.circle,
                       ),
-              ),
+                      child: Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(
+                              Icons.videocam,
+                              color: Colors.white,
+                              size: 80,
+                            ),
+                            const SizedBox(height: 16),
+                            Text(
+                              'RECORDING',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 20,
+                                fontWeight: FontWeight.bold,
+                                shadows: [
+                                  Shadow(
+                                    blurRadius: 10.0,
+                                    color: Colors.red.shade800,
+                                    offset: const Offset(0, 0),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    )
+                  : const Text(
+                      'Press the button below to start recording',
+                      style: TextStyle(fontSize: 18),
+                    ),
             ),
           ),
-          Expanded(
-            flex: 1,
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(16),
-              child: Column(
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(20),
+            child: ElevatedButton(
+              onPressed: _toggleRecording,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _isRecording ? Colors.red : Colors.blue,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 20),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                minimumSize: const Size(double.infinity, 100),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _isRecording ? Colors.red : Colors.blue,
-                      padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 50),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(15),
-                      ),
-                      minimumSize: const Size(300, 100),
-                    ),
-                    onPressed: _isRecording ? _stopRecording : _startRecording,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          _isRecording ? Icons.stop : Icons.videocam,
-                          size: 36,
-                          color: Colors.white,
-                        ),
-                        const SizedBox(width: 12),
-                        Text(
-                          _isRecording ? 'STOP RECORDING' : 'START RECORDING',
-                          style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white),
-                        ),
-                      ],
-                    ),
+                  Icon(
+                    _isRecording ? Icons.stop : Icons.videocam,
+                    size: 40,
                   ),
-                  const SizedBox(height: 16),
-                  Expanded(
-                    child: StreamBuilder<String>(
-                      stream: _logStreamController.stream,
-                      builder: (context, snapshot) {
-                        return Container(
-                          decoration: BoxDecoration(
-                            color: Colors.black.withOpacity(0.1),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          padding: const EdgeInsets.all(8),
-                          child: SingleChildScrollView(
-                            child: Text(
-                              snapshot.data ?? 'Waiting for logs...',
-                              style: const TextStyle(fontSize: 12),
-                            ),
-                          ),
-                        );
-                      },
+                  const SizedBox(width: 16),
+                  Text(
+                    _isRecording ? 'STOP RECORDING' : 'START RECORDING',
+                    style: const TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
                     ),
                   ),
                 ],
               ),
+            ),
+          ),
+          Container(
+            height: 200,
+            margin: const EdgeInsets.all(20),
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Colors.black.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.grey.shade400),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'LOG:',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 4),
+                Expanded(
+                  child: ListView.builder(
+                    controller: _scrollController,
+                    itemCount: _logMessages.length,
+                    itemBuilder: (context, index) {
+                      return Text(
+                        _logMessages[index],
+                        style: const TextStyle(fontSize: 12),
+                      );
+                    },
+                  ),
+                ),
+              ],
             ),
           ),
         ],
